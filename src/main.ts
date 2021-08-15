@@ -20,13 +20,35 @@ export default function main(props: Props) {
 
     await connection.connect();
 
-    const emitter = await subscribe(connection, argv);
+    const emitter = new events.EventEmitter();
+
+    await connection.subscribe(
+      argv.topic,
+      mqtt.QoS.AtLeastOnce,
+      (topic, payload, dup, qos, retain) => {
+        const message = parsePayload(payload);
+        console.log(
+          `Publish received. topic:"${topic}" dup:${dup} qos:${qos} retain:${retain}`
+        );
+        console.log(message);
+
+        if (message.sequence == argv.count) {
+          emitter.emit("finish");
+        }
+      }
+    );
 
     const finishPromise = new Promise<void>(async (resolve, reject) => {
       emitter.on("finish", resolve);
     });
 
-    publish(connection, argv);
+    await runMultipleTimes(argv.count, async (count) => {
+      await connection.publish(
+        argv.topic,
+        getPayload(argv.message, count),
+        mqtt.QoS.AtLeastOnce
+      );
+    });
 
     await finishPromise;
 
@@ -73,55 +95,27 @@ function createClient(argv: Args) {
   return client;
 }
 
-/**
- * この関数の完了（戻り値となるPromiseがresolveすること）は「購読を開始したこと」を表す。
- * そのためEmitterを用いて「購読を完了したこと」を返すこととする。
- *
- * @param connection
- * @param argv
- * @returns
- */
-async function subscribe(connection: mqtt.MqttClientConnection, argv: Args) {
-  const emitter = new events.EventEmitter();
-
-  const decoder = new TextDecoder("utf8");
-
-  await connection.subscribe(
-    argv.topic,
-    mqtt.QoS.AtLeastOnce,
-    (
-      topic: string,
-      payload: ArrayBuffer,
-      dup: boolean,
-      qos: mqtt.QoS,
-      retain: boolean
-    ) => {
-      const json = decoder.decode(payload);
-      console.log(
-        `Publish received. topic:"${topic}" dup:${dup} qos:${qos} retain:${retain}`
-      );
-      console.log(json);
-      const message = JSON.parse(json);
-
-      if (message.sequence == argv.count) {
-        emitter.emit("finish");
-      }
-    }
-  );
-
-  return emitter;
+const decoder = new TextDecoder("utf8");
+function parsePayload(payload: ArrayBuffer) {
+  const json = decoder.decode(payload);
+  console.log(json);
+  return JSON.parse(json);
+}
+function getPayload(message: string, sequence: number) {
+  return JSON.stringify({ message, sequence });
 }
 
-function publish(connection: mqtt.MqttClientConnection, argv: Args) {
-  for (let op_idx = 0; op_idx < argv.count; ++op_idx) {
-    const publish = async () => {
-      const msg = {
-        message: argv.message,
-        sequence: op_idx + 1,
-      };
-      const json = JSON.stringify(msg);
-      connection.publish(argv.topic, json, mqtt.QoS.AtLeastOnce);
-    };
-    setTimeout(publish, op_idx * 1000);
-  }
+async function runMultipleTimes(
+  times: number,
+  fn: (c: number) => Promise<void>,
+  count: number = 0
+) {
+  if (count === times) return;
+  await fn(count + 1);
+  await wait(1000);
+  runMultipleTimes(times, fn, count + 1);
+}
+
+function wait(ms: number) {
+  return new Promise((res) => setTimeout(res, ms));
 }
